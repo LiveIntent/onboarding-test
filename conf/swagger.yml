@@ -1,0 +1,10 @@
+---
+  swagger: "2.0"
+  info:
+    title: "<SCALA_APP_NAME>"
+    description: "And put here the description"
+    version: "0.0.1"
+  host: tbd
+  schemes:
+    - "https"
+    - "http"

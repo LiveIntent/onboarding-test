@@ -1,0 +1,150 @@
+version: 2
+
+references:
+  ivy_cache_paths: &ivy_cache_paths
+    paths:
+      - ~/.sbt
+      - ~/.ivy2
+
+  save_ivy_cache1: &save_ivy_cache1
+    save_cache:
+      key: v2-sbt-deps-cache-{{ checksum "build.sbt" }}-{{ checksum "project/plugins.sbt" }}
+      <<: *ivy_cache_paths
+
+  save_ivy_cache2: &save_ivy_cache2
+    save_cache:
+      key: v2-sbt-deps-cache--{{ checksum "project/plugins.sbt" }}
+      <<: *ivy_cache_paths
+
+  save_ivy_cache3: &save_ivy_cache3
+    save_cache:
+      key: v2-sbt-deps-cache-{{ checksum "build.sbt" }}-
+      <<: *ivy_cache_paths
+
+  restore_ivy_cache: &restore_ivy_cache
+    restore_cache:
+      keys:
+        - v2-sbt-deps-cache-{{ checksum "build.sbt" }}-{{ checksum "project/plugins.sbt" }}
+        - v2-sbt-deps-cache--{{ checksum "project/plugins.sbt" }}
+        - v2-sbt-deps-cache-{{ checksum "build.sbt" }}-
+
+  save_compilation_cache: &save_compilation_cache
+    save_cache:
+      key: v2-compilation_artifacts-{{ .Branch }}-{{ checksum "build.sbt" }}-{{ checksum "project/plugins.sbt" }}
+      paths:
+        - target
+        - project/target
+
+  restore_compilation_cache: &restore_compilation_cache
+    restore_cache:
+      keys:
+        - v2-compilation_artifacts-{{ .Branch }}-{{ checksum "build.sbt" }}-{{ checksum "project/plugins.sbt" }}
+        # Reuse the cache from master for the first commit on a branch
+        - v2-compilation_artifacts-master-{{ checksum "build.sbt" }}-{{ checksum "project/plugins.sbt" }}
+
+  configure_sbt: &configure_sbt
+    run:
+      name: Set up SBT
+      command: |
+        mkdir -p ~/.sbt/1.0/plugins
+        echo "credentials += Credentials(\"Artifactory Realm\", \"liveintent.jfrog.io\", \"${ARTIFACTORY_USERNAME}\", \"${ARTIFACTORY_PASSWORD}\")" >~/.sbt/1.0/sonatype.sbt
+        echo 'addSbtPlugin("org.scoverage" % "sbt-scoverage" % "1.5.1")' >~/.sbt/1.0/plugins/plugins.sbt
+
+  persist_compilation_workspace: &persist_compilation_workspace
+    persist_to_workspace:
+      root: target
+      paths:
+        - ./*
+
+  restore_compilation_workspace: &restore_compilation_workspace
+    attach_workspace:
+      at: target
+
+jobs:
+  build_and_test:
+    machine: true
+    steps:
+      - checkout
+      - *restore_ivy_cache
+      - *restore_compilation_cache
+      - *configure_sbt
+
+      # The 'exit' is important, this step tends to hang without it in many,
+      # but not all :/, projects
+      - run:
+          name: Compile sources
+          command: sbt test:compile exit
+
+      - *save_ivy_cache1
+      - *save_ivy_cache2
+      - *save_ivy_cache3
+      - *save_compilation_cache
+
+      # The 'exit' is important, this step tends to hang without it in many,
+      # but not all :/, projects
+      - run:
+          name: Run tests, collect coverage stats
+          command: sbt coverage test coverageReport exit
+
+      - store_test_results:
+          path: target/test-reports
+
+      - store_artifacts:
+          path: target/scala-2.12/scoverage-report
+          destination: coverage
+
+      - *persist_compilation_workspace
+
+  publish_snapshot: &publish
+    machine: true
+    steps:
+      - checkout
+      - *restore_ivy_cache
+      - *configure_sbt
+      - *restore_compilation_workspace
+
+      - run:
+          name: Publish Docker image
+          command: sbt ebPublish exit
+
+  publish_tagged_release:
+    <<: *publish
+
+
+workflows:
+  version: 2
+  build_and_publish:
+    jobs:
+      - build_and_test:
+          context: org-global
+          filters:
+            tags:
+              only: /.*/
+
+      # Require manual approval to publish snapshot releases
+      - publish_snapshot?:
+          type: approval
+          requires:
+            - build_and_test
+          filters:
+            tags:
+              only: /^$/
+
+      - publish_snapshot:
+          context: org-global
+          requires:
+            - publish_snapshot?
+          filters:
+            tags:
+              only: /^$/
+
+      # Unconditionally publish all tagged releases
+      - publish_tagged_release:
+          context: org-global
+          requires:
+            - build_and_test
+          filters:
+            tags:
+              only: /^.+$/
+            branches:
+              ignore: /.*/
